@@ -1,0 +1,1 @@
+from .pyads1292 import Pyads1292
