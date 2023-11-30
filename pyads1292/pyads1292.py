@@ -1,65 +1,91 @@
 from __future__ import division
 from deltasigma import *
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy as sci
 
-#Pines:
-
-# Numero    | Nombre    | Function              | Description
-
-############# NO IMPLEMENTADOS
-
-# 1 | PGA1N     | Analog Output         | PGA1 inverting output
-# 2 | PGA1P     | Analog Output         | PGA1 noninverting output
-# 7 | PGA2N     | Analog Output         | PGA2 inverting output
-# 8 | PGA2P     | Analog Output         | PGA2 noninverting output
-
-# 12| AVDD      | Supply                | Analog supply
-# 13| AVSS      | Supply Analog         | ground
-# 15| PWDN/RESET| Digital input         | Power-down or system reset; active low
-# 23| DVDD      | Supply Digital        | power supply
-# 24| DGND      | Supply Digital        | ground
-
-############# SI IMPLEMENTADOS
-# 3 | IN1N      | Analog Input          | Differential analog negative input 1
-# 4 | IN1P      | Analog Input          | Differential analog positive input 1
-# 5 | IN2N      | Analog Input          | Differential analog negative input 2
-# 6 | IN2P      | Analog Input          | Differential analog positive input 2
-
-# 9 | VREFP     | Analog input/output   | Positive reference voltage
-# 1 | VREFN     | Analog input Negative | reference voltage; must be connected to AVSS
-# 27| VCAP2     | —                     | Analog bypass capacitor
-# 14| CLKSEL    | Digital input         | Master clock select
-# 16| START     | Digital input         | Start conversion
-# 17| CLK       | Digital input         | Master clock input
-# 18| CS        | Digital input         | Chip select
-# 19| DIN       | Digital input         | SPI data in
-# 20| SCLK      | Digital input         | SPI clock
-# 21| DOUT      | Digital output        | SPI data out
-# 22| DRDY      | Digital output        | Data ready; active low
-
-# 25| GPIO2/RCLK2| Digital input/output | General-purpose I/O 2 or resp clock 2 (ADS1292R)
-# 26| GPIO1/RCLK1| Digital input/output | General-purpose I/O 1 or resp clock 1 (ADS1292R)
-
-# 28| RLDINV    | Analog input          | Right leg drive inverting input; connect to AVDD if not used
-# 29| RLDIN     | Analog input          | Right leg drive input to MUX or RLD amplifier noninverting input; connect to AVDD if not used
-# 30| RLDOUT    | Analog output         | Right leg drive output
-# 31| RESP_MODP | Analog output/input   | P-side respiration excitation signal for respiration (analog output) or auxiliary input 3P (analog input)
-# 32| RESP_MODN | Analog output/input   | N-side respiratio
-
-# Pines que no son necesarios:
-#               - PGA1N
-#               - PGA1P
-#               - PGA2N
-#               - PGA2P
 
 class Pyads1292():
     def __init__(self):
-        self.clk = 512000                                       #Frecuencia reloj interno
-        self.fmod = 128000                                      #Frecuencia de muestreo de la modulacion sigma delta
-        self.fb = 60                                            #frecuencia maxima de la señal de entrada (testeo)
-        self.OSR = int(self.fmod / (2 * self.fb))
+        self.clk = 512000
+        self.fmod = 128000
+        self.fb = 100
+        self.OSR = 64
         self.order = 2
         self.H = synthesizeNTF(self.order, self.OSR, 1)
+        self.gain = 1
+        self.fsps = 500
 
-    def simulateDSM(self, u):
-        return simulateDSM(u, self.H)
+    def pga(self,u, fs):
+        u = u*self.gain
+        sos = sci.signal.butter(2, 8400, 'lowpass', fs=fs, output='sos')
+        filtered = sci.signal.sosfilt(sos, u)
+        return filtered
+
+    def modulacion(self, u, fs):
+        u = self.pga(u, fs)
+        t_max = len(u)/fs
+        if fs>=self.fmod:
+            m = math.ceil(fs / self.fmod)
+            u_fmod = u[::m]
+            print(m)
+            print(len(u))
+            print(len(u_fmod))
+        else:
+            u_fmod = sci.signal.resample(u, int(128000 * t_max))
+
+        return simulateDSM(u_fmod, self.H, 4)
+
+
+    def decimate(self, u, fs):
+        v, xn, xmax, y = self.modulacion(u, fs)
+        if self.fsps==125:
+            DecFact = 1024
+        elif self.fsps==250:
+            DecFact = 512
+        elif self.fsps==500:
+            DecFact = 256
+        elif self.fsps==1000:
+            DecFact = 128
+        elif self.fsps==2000:
+            DecFact = 64
+        elif self.fsps==4000:
+            DecFact = 32
+        else:
+            DecFact = 16
+        ydec = sinc_decimate(v, 3, DecFact)
+        print(len(ydec))
+        return ydec
+
+
+
+
+    def osr(self, u, ftest, fs):
+        #v, xn, xmax, y = self.simulateDSM(u, fs)
+        v = self.decimate(u, fs)
+        N = len(v)
+
+        f = np.linspace(0, 0.5, N // 2 + 1)
+        spec = np.fft.fft(v * ds_hann(N)) / (N / 4)
+        plt.plot(f, dbv(spec[:N // 2 + 1]), 'b', label='Simulation')
+
+        figureMagic([0, 0.5], 0.05, None, [-160, 0], 20, None, (16, 6), 'Output Spectrum')
+        plt.xlabel('Normalized Frequency')
+        plt.ylabel('dBFS')
+        snr = calculateSNR(spec[2:self.fb + 1], ftest - 2)
+        plt.text(0.05, -10, 'SNR = %4.1fdB' % (snr), verticalalignment='center')
+        NBW = 1.5 / N
+        Sqq = 4 * evalTF(self.H, np.exp(2j * np.pi * f)) ** 2 / 3.
+        plt.text(0.49, -90, 'NBW = %4.1E x $f_s$' % NBW, horizontalalignment='right')
+        plt.legend(loc=4)
+        plt.show()
+
+        ENOB = (snr-1.76)/6.02
+        return ENOB
+
+    def adc(self, u, fs):
+        v_decimated = self.decimate(u, fs)
+        return v_decimated
+
 
